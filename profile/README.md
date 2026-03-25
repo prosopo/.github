@@ -19,7 +19,7 @@ Prosopo is designed for easy deployment across the entire tech stack:
 ## 🔗 Official Resources
 * **Main Website:** [prosopo.io](https://prosopo.io)
 * **Documentation:** [docs.prosopo.io](https://docs.prosopo.io)
-* **Get Started:** [Protect your website today](https://prosopo.io/register)
+* **Get Started:** [Start for free today](https://prosopo.io/pricing)
 
 ---
 ### 🛠 Technical Keywords
