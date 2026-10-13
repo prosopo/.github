@@ -4,9 +4,16 @@ Open PRs are added to the board with the "open" status and their author assigned
 merged or closed PRs get the "closed" status. Project workflows built into GitHub
 cannot assign people, and their settings cannot be changed through the API, so this
 runs from Actions instead.
+
+It sweeps the listed repos on a schedule rather than reacting to pull_request
+events: Actions only fires on events in the repo holding the workflow, which would
+mean a file in every repo, and pull_request_target (needed to give fork PRs the
+token) is a known injection risk. Every operation is idempotent, so overlapping
+sweep windows are harmless.
 """
 
 import argparse
+import calendar
 import json
 import os
 import sys
@@ -112,44 +119,52 @@ def sync_pr(gh, board, repo, pr, open_status, closed_status):
     log("pr.synced", repo=repo, pr=pr["number"], status=status, item=item, assigned=assigned)
 
 
-def open_prs(gh, repo):
+def parse_time(s):
+    return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def recent_prs(gh, repo, since_minutes, now=None):
+    """PRs to sync: every open PR when since_minutes is 0, else any PR updated in the window."""
+    state, cutoff = ("open", None) if since_minutes == 0 else ("all", (now or time.time()) - since_minutes * 60)
     page = 1
     while True:
-        batch = gh.request("GET", f"/repos/{repo}/pulls?state=open&per_page=100&page={page}")
-        yield from batch
+        batch = gh.request("GET", f"/repos/{repo}/pulls?state={state}&sort=updated&direction=desc&per_page=100&page={page}")
+        for pr in batch:
+            if cutoff is not None and parse_time(pr["updated_at"]) < cutoff:
+                return
+            yield pr
         if len(batch) < 100:
             return
         page += 1
 
 
-def main(argv=None, gh=None):
+def main(argv=None, gh=None, now=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--owner", required=True)
     ap.add_argument("--project-number", required=True, type=int)
     ap.add_argument("--open-status", required=True)
     ap.add_argument("--closed-status", required=True)
-    ap.add_argument("--event-path", help="pull_request event payload to sync that one PR")
-    ap.add_argument("--backfill-repo", action="append", default=[], help="owner/repo whose open PRs to sync")
+    ap.add_argument("--repo", action="append", required=True, help="owner/repo to sweep; repeat")
+    ap.add_argument("--since-minutes", type=int, default=0, help="only PRs updated this recently; 0 = every open PR")
     a = ap.parse_args(argv)
-    if not a.event_path and not a.backfill_repo:
-        ap.error("give --event-path or --backfill-repo")
     gh = gh or GitHub(os.environ["GH_TOKEN"])
     board = Board(gh, a.owner, a.project_number)
-    failures = 0
-    targets = []
-    if a.event_path:
-        with open(a.event_path) as f:
-            event = json.load(f)
-        targets.append((event["repository"]["full_name"], event["pull_request"]))
-    for repo in a.backfill_repo:
-        targets.extend((repo, pr) for pr in open_prs(gh, repo))
-    for repo, pr in targets:
+    synced = failures = 0
+    for repo in a.repo:
         try:
-            sync_pr(gh, board, repo, pr, a.open_status, a.closed_status)
-        except Exception as e:  # one bad PR must not stop a backfill
+            prs = list(recent_prs(gh, repo, a.since_minutes, now))
+        except Exception as e:  # one unreachable repo must not stop the others
             failures += 1
-            log("pr.failed", repo=repo, pr=pr.get("number"), error=str(e)[:300])
-    log("run.done", synced=len(targets) - failures, failed=failures)
+            log("repo.failed", repo=repo, error=str(e)[:300])
+            continue
+        for pr in prs:
+            try:
+                sync_pr(gh, board, repo, pr, a.open_status, a.closed_status)
+                synced += 1
+            except Exception as e:  # one bad PR must not stop the sweep
+                failures += 1
+                log("pr.failed", repo=repo, pr=pr.get("number"), error=str(e)[:300])
+    log("run.done", synced=synced, failed=failures)
     return 1 if failures else 0
 
 

@@ -1,66 +1,45 @@
-# Reusable: puts the calling repo's pull request on the org project board.
-# Open PRs (drafts included) → "In progress 📊" with the author assigned; merged/closed → "Done ✅".
-# The default GITHUB_TOKEN cannot write org projects, so callers pass PROJECT_TOKEN:
-# a GitHub App installation token or fine-grained PAT with org Projects read/write
-# and Pull requests + Issues write on the calling repo.
+# Keeps PRs from the listed repos on https://github.com/orgs/prosopo/projects/4:
+# open (drafts included) → "In progress 📊" with the author assigned; merged/closed → "Done ✅".
+# A schedule here instead of pull_request triggers in every repo: see scripts/project_board.py.
+# PROJECT_TOKEN: GitHub App installation token or fine-grained PAT with org Projects
+# read/write and Pull requests + Issues write on the swept repos.
 name: project-board
 
 on:
-  workflow_call:
-    inputs:
-      project-number:
-        type: number
-        default: 4
-      open-status:
-        type: string
-        default: "In progress 📊"
-      closed-status:
-        type: string
-        default: "Done ✅"
-      runs-on:
-        type: string
-        default: ubuntu-latest
-    secrets:
-      PROJECT_TOKEN:
-        required: true
+  schedule:
+    - cron: "*/10 * * * *"
   workflow_dispatch:
     inputs:
-      repos:
-        description: Space-separated owner/repo list whose open PRs to backfill
-        default: "prosopo/captcha prosopo/captcha-private prosopo/docs prosopo/Protect"
+      since-minutes:
+        description: Only PRs updated this recently; 0 backfills every open PR
+        default: "0"
 
 permissions: {}
 
+concurrency:
+  group: project-board
+  cancel-in-progress: false
+
+env:
+  REPOS: prosopo/captcha prosopo/captcha-private prosopo/docs prosopo/Protect
+
 jobs:
-  sync:
-    runs-on: ${{ inputs.runs-on || 'ubuntu-latest' }}
+  sweep:
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          repository: prosopo/.github
-          ref: main
           sparse-checkout: scripts
           persist-credentials: false
-      - name: Sync this pull request
-        if: github.event_name != 'workflow_dispatch'
+      - name: Sweep pull requests
         env:
           GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-          OWNER: ${{ github.repository_owner }}
-          PROJECT: ${{ inputs.project-number }}
-          OPEN_STATUS: ${{ inputs.open-status }}
-          CLOSED_STATUS: ${{ inputs.closed-status }}
-        run: >
-          python3 scripts/project_board.py --owner "$OWNER" --project-number "$PROJECT"
-          --open-status "$OPEN_STATUS" --closed-status "$CLOSED_STATUS"
-          --event-path "$GITHUB_EVENT_PATH"
-      - name: Backfill open pull requests
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
-          REPOS: ${{ inputs.repos }}
+          # Three times the cron interval: scheduled runs are often late or skipped.
+          SINCE_MINUTES: ${{ inputs.since-minutes || '30' }}
         run: |
           args=()
-          for r in $REPOS; do args+=(--backfill-repo "$r"); done
+          for r in $REPOS; do args+=(--repo "$r"); done
           python3 scripts/project_board.py --owner prosopo --project-number 4 \
-            --open-status "In progress 📊" --closed-status "Done ✅" "${args[@]}"
+            --open-status "In progress 📊" --closed-status "Done ✅" \
+            --since-minutes "$SINCE_MINUTES" "${args[@]}"
