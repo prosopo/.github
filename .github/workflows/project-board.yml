@@ -1,0 +1,52 @@
+# Keeps PRs from the listed repos on https://github.com/orgs/prosopo/projects/4:
+# open (drafts included) → "In progress 📊" with the author assigned; merged/closed → "Done ✅".
+# A schedule here instead of pull_request triggers in every repo: see scripts/project_board.py.
+# Auth: the default GITHUB_TOKEN can't write org projects or other repos, so this mints a
+# token from the org's project-board GitHub App (vars.PROJECT_APP_CLIENT_ID +
+# secrets.PROJECT_APP_PRIVATE_KEY; app needs org Projects RW, Pull requests + Issues RW).
+name: project-board
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      since-minutes:
+        description: Only PRs updated this recently; 0 backfills every open PR
+        default: "0"
+
+permissions: {}
+
+concurrency:
+  group: project-board
+  cancel-in-progress: false
+
+env:
+  REPOS: prosopo/captcha prosopo/captcha-private prosopo/docs prosopo/Protect
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.PROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+          owner: prosopo
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+      - name: Sweep pull requests
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          # Three times the cron interval: scheduled runs are often late or skipped.
+          SINCE_MINUTES: ${{ inputs.since-minutes || '30' }}
+        run: |
+          args=()
+          for r in $REPOS; do args+=(--repo "$r"); done
+          python3 scripts/project_board.py --owner prosopo --project-number 4 \
+            --open-status "In progress 📊" --closed-status "Done ✅" \
+            --since-minutes "$SINCE_MINUTES" "${args[@]}"
