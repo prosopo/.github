@@ -1,8 +1,9 @@
 # Keeps PRs from the listed repos on https://github.com/orgs/prosopo/projects/4:
 # open (drafts included) → "In progress 📊" with the author assigned; merged/closed → "Done ✅".
 # A schedule here instead of pull_request triggers in every repo: see scripts/project_board.py.
-# PROJECT_TOKEN: GitHub App installation token or fine-grained PAT with org Projects
-# read/write and Pull requests + Issues write on the swept repos.
+# Auth: the default GITHUB_TOKEN can't write org projects or other repos, so this mints a
+# token from the org's project-board GitHub App (vars.PROJECT_APP_CLIENT_ID +
+# secrets.PROJECT_APP_PRIVATE_KEY; app needs org Projects RW, Pull requests + Issues RW).
 name: project-board
 
 on:
@@ -28,13 +29,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.PROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+          owner: prosopo
       - uses: actions/checkout@v4
         with:
           sparse-checkout: scripts
           persist-credentials: false
       - name: Sweep pull requests
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           # Three times the cron interval: scheduled runs are often late or skipped.
           SINCE_MINUTES: ${{ inputs.since-minutes || '30' }}
         run: |
