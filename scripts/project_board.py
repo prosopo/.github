@@ -1,9 +1,11 @@
-"""Keep every pull request in an org's repos on an org Projects v2 board.
+"""Keep exactly the open pull requests in an org's repos on an org Projects v2 board.
 
-A PR that is not on the board yet (archived board items count as on it) is added:
-open ones with the "open" status and their author assigned, merged or closed ones
-with the "closed" status. A PR already on the board keeps whatever status people gave
-it, except that a merged or closed PR whose item is still active moves to "closed".
+An open PR (drafts included) that is not on the board is added with the "open" status,
+and its author is assigned. An open PR already on the board keeps whatever status
+people gave it. A merged or closed PR is deleted from the board, archived items
+included: the board is a view of work in flight, and a project holds at most 50,000
+items with archived ones counting, so only deleting frees room. Deleting removes the
+item's field values (status, priority) for good; reopening the PR re-adds it fresh.
 
 Project workflows built into GitHub cannot assign people, and their settings cannot
 be changed through the API, so this runs from Actions instead. It sweeps every
@@ -13,9 +15,10 @@ which would mean a file in every repo, and pull_request_target (needed to give f
 PRs the token) is a known injection risk.
 
 GitHub caps content-creating requests at about 80 a minute and 500 an hour, and the
-first sweep has thousands of PRs to add. So each run makes at most --max-writes
-writes, newest PRs first, and stops cleanly if GitHub throttles it anyway. Later runs
-skip what is already on the board, so the backlog drains over successive runs.
+first sweep has over a thousand old PR items to delete. So each run makes at most
+--max-writes writes, --write-interval seconds apart, newest PRs first, and stops
+cleanly if GitHub throttles it anyway. Later runs skip what is already in step, so a
+backlog drains over successive runs.
 """
 
 import argparse
@@ -115,6 +118,11 @@ mutation($project: ID!, $content: ID!) {
   addProjectV2ItemById(input: {projectId: $project, contentId: $content}) { item { id } }
 }"""
 
+DELETE_ITEM = """
+mutation($project: ID!, $item: ID!) {
+  deleteProjectV2Item(input: {projectId: $project, itemId: $item}) { deletedItemId }
+}"""
+
 SET_STATUS = """
 mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
   updateProjectV2ItemFieldValue(input: {projectId: $project, itemId: $item, fieldId: $field,
@@ -145,6 +153,9 @@ class Board:
 
     def set_status(self, item, status):
         self.gh.graphql(SET_STATUS, project=self.id, item=item, field=self.field_id, option=self.option(status))
+
+    def delete(self, item):
+        self.gh.graphql(DELETE_ITEM, project=self.id, item=item)
 
 
 def org_repos(gh):
@@ -179,46 +190,46 @@ def author_to_assign(pr):
     return author["login"]
 
 
-def plan(pr, board, open_status, closed_status):
+def plan(pr, board, open_status):
     """Writes this PR needs, as (kind, arg) pairs; empty when it is already in step."""
-    want = open_status if pr["state"] == "OPEN" else closed_status
     item = next((i for i in pr["projectItems"]["nodes"] if i["project"]["id"] == board.id), None)
-    steps = []
-    if item is None:
-        steps += [("add", None), ("status", want)]
-    elif pr["state"] != "OPEN" and not item["isArchived"] and (item["status"] or {}).get("name") != closed_status:
-        steps.append(("status", closed_status))
+    if pr["state"] != "OPEN":
+        return (item["id"], [("delete", None)]) if item else (None, [])
+    steps = [("add", None), ("status", open_status)] if item is None else []
     login = author_to_assign(pr)
     if login:
         steps.append(("assign", login))
     return item and item["id"], steps
 
 
-def apply(gh, board, repo, pr, item, steps):
+def apply(gh, board, repo, pr, item, steps, pace):
     for kind, arg in steps:
+        pace()
         if kind == "add":
             item = board.add(pr["id"])
         elif kind == "status":
             board.set_status(item, arg)
+        elif kind == "delete":
+            board.delete(item)
         else:
             gh.request("POST", f"/repos/{repo}/issues/{pr['number']}/assignees", {"assignees": [arg]})
     log("pr.synced", repo=repo, pr=pr["number"], item=item, steps=[k if a is None else f"{k}:{a}" for k, a in steps])
 
 
-def main(argv=None, gh=None):
+def main(argv=None, gh=None, sleep=time.sleep):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--owner", required=True)
     ap.add_argument("--project-number", required=True, type=int)
     ap.add_argument("--open-status", required=True)
-    ap.add_argument("--closed-status", required=True)
     ap.add_argument("--repo", action="append", help="owner/repo to sweep; repeat. Default: every non-archived repo")
-    ap.add_argument("--max-writes", type=int, default=70, help="stop after this many writes; the next run continues")
+    ap.add_argument("--max-writes", type=int, default=400, help="stop after this many writes; the next run continues")
+    ap.add_argument("--write-interval", type=float, default=1.0,
+                    help="seconds to wait before each write, keeping under ~80 content-creating requests a minute")
     ap.add_argument("--dry-run", action="store_true", help="plan and log the writes without making any")
     a = ap.parse_args(argv)
     gh = gh or GitHub(os.environ["GH_TOKEN"])
     board = Board(gh, a.owner, a.project_number)
-    for status in (a.open_status, a.closed_status):
-        board.option(status)
+    board.option(a.open_status)
     repos = a.repo or org_repos(gh)
     log("run.start", repos=len(repos), max_writes=a.max_writes)
 
@@ -227,7 +238,7 @@ def main(argv=None, gh=None):
         for repo in repos:
             try:
                 for pr in repo_prs(gh, repo):
-                    item, steps = plan(pr, board, a.open_status, a.closed_status)
+                    item, steps = plan(pr, board, a.open_status)
                     if steps:
                         todo.append((pr["updatedAt"], repo, pr, item, steps))
             except Throttled:
@@ -248,7 +259,7 @@ def main(argv=None, gh=None):
                 log("run.budget_spent", writes=writes, remaining_prs=len(todo) - done)
                 break
             try:
-                apply(gh, board, repo, pr, item, steps)
+                apply(gh, board, repo, pr, item, steps, lambda: sleep(a.write_interval))
                 synced += 1
             except Throttled:
                 raise

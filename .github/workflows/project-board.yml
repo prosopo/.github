@@ -1,6 +1,6 @@
-# Keeps every PR in every non-archived prosopo repo on https://github.com/orgs/prosopo/projects/4:
-# PRs missing from the board are added, open (drafts included) as "In progress 📊" with the author
-# assigned, merged/closed as "Done ✅"; a merged/closed PR still active on the board moves to "Done ✅".
+# Keeps exactly the open PRs of every non-archived prosopo repo on https://github.com/orgs/prosopo/projects/4:
+# open PRs (drafts included) missing from the board are added as "In progress 📊" with the author
+# assigned; merged/closed PRs are deleted from the board, archived items included.
 # A schedule here instead of pull_request triggers in every repo: see scripts/project_board.py.
 # Auth: the default GITHUB_TOKEN can't write org projects or other repos, so this mints a
 # token from the org's prosopo-project-board GitHub App (vars.PROJECT_APP_CLIENT_ID +
@@ -9,12 +9,12 @@ name: project-board
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       max-writes:
         description: Stop after this many writes; the next run continues
-        default: "70"
+        default: "400"
 
 permissions: {}
 
@@ -25,7 +25,7 @@ concurrency:
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - id: app
         uses: actions/create-github-app-token@v3
@@ -40,9 +40,9 @@ jobs:
       - name: Sweep pull requests
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          # 70 writes every 10 minutes stays under GitHub's ~500 content-creating requests an hour.
-          MAX_WRITES: ${{ inputs.max-writes || '70' }}
+          # 400 writes an hour, 1s apart, stays under GitHub's ~500 content-creating requests an hour
+          # and ~80 a minute.
+          MAX_WRITES: ${{ inputs.max-writes || '400' }}
         run: |
           python3 scripts/project_board.py --owner prosopo --project-number 4 \
-            --open-status "In progress 📊" --closed-status "Done ✅" \
-            --max-writes "$MAX_WRITES"
+            --open-status "In progress 📊" --max-writes "$MAX_WRITES"

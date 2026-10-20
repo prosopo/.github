@@ -20,9 +20,10 @@ class FakeGitHub:
         self.fail_list_for = set(fail_list_for)
         self.throttle_after = throttle_after
         self.calls = []
+        self.sleeps = []
 
     def writes(self):
-        return [c for c in self.calls if c[0] in ("add", "status", "POST")]
+        return [c for c in self.calls if c[0] in ("add", "status", "delete", "POST")]
 
     def _maybe_throttle(self):
         if self.throttle_after is not None and len(self.writes()) > self.throttle_after:
@@ -51,6 +52,10 @@ class FakeGitHub:
             self.calls.append(("status", v["item"], v["option"]))
             self._maybe_throttle()
             return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": v["item"]}}}
+        if "deleteProjectV2Item" in query:
+            self.calls.append(("delete", v["item"]))
+            self._maybe_throttle()
+            return {"deleteProjectV2Item": {"deletedItemId": v["item"]}}
         raise AssertionError(query)
 
     def request(self, method, path, body=None):
@@ -79,7 +84,7 @@ def run(gh, *args):
     out = io.StringIO()
     with redirect_stdout(out):
         rc = pb.main(["--owner", "prosopo", "--project-number", "4",
-                      "--open-status", "In progress 📊", "--closed-status", "Done ✅", *args], gh=gh)
+                      "--open-status", "In progress 📊", *args], gh=gh, sleep=gh.sleeps.append)
     return rc, [json.loads(line) for line in out.getvalue().splitlines()]
 
 
@@ -99,11 +104,11 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(gh.writes(), [("add", "PR7"), ("status", "item-PR7", "opt-prog"),
                                        ("POST", "/repos/prosopo/captcha/issues/7/assignees", {"assignees": ["alice"]})])
 
-    def test_merged_and_closed_prs_not_on_board_added_done_without_assigning(self):
+    def test_merged_and_closed_prs_not_on_board_are_not_added(self):
         gh = FakeGitHub(pulls={"prosopo/captcha": [pr(8, state="MERGED"), pr(9, state="CLOSED")]})
-        sweep(gh)
-        self.assertEqual(gh.writes(), [("add", "PR8"), ("status", "item-PR8", "opt-done"),
-                                       ("add", "PR9"), ("status", "item-PR9", "opt-done")])
+        rc, logs = sweep(gh)
+        self.assertEqual((rc, gh.writes()), (0, []))
+        self.assertEqual(events(logs, "run.planned")[0]["prs"], 0)
 
     def test_open_pr_on_board_keeps_its_status(self):
         gh = FakeGitHub(pulls={"prosopo/captcha": [pr(1, assignees=["alice"], items=[item(status="High Priority")])]})
@@ -121,25 +126,32 @@ class PlanTests(unittest.TestCase):
         sweep(gh)
         self.assertEqual(gh.writes(), [("POST", "/repos/prosopo/captcha/issues/1/assignees", {"assignees": ["alice"]})])
 
-    def test_closed_pr_on_board_moves_to_done(self):
+    def test_merged_pr_on_board_is_deleted(self):
         gh = FakeGitHub(pulls={"prosopo/captcha": [pr(2, state="MERGED", items=[item(status="In progress 📊")])]})
-        sweep(gh)
-        self.assertEqual(gh.writes(), [("status", "I-P1", "opt-done")])
+        rc, logs = sweep(gh)
+        self.assertEqual((rc, gh.writes()), (0, [("delete", "I-P1")]))
+        self.assertEqual(events(logs, "pr.synced")[0]["steps"], ["delete"])
 
-    def test_closed_pr_already_done_untouched(self):
+    def test_closed_pr_on_board_is_deleted_whatever_its_status(self):
         gh = FakeGitHub(pulls={"prosopo/captcha": [pr(2, state="CLOSED", items=[item(status="Done ✅")])]})
         sweep(gh)
-        self.assertEqual(gh.writes(), [])
+        self.assertEqual(gh.writes(), [("delete", "I-P1")])
 
-    def test_archived_item_counts_as_on_board_and_is_untouched(self):
-        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(3, state="MERGED", items=[item(status="In progress 📊", archived=True)])]})
+    def test_archived_item_of_closed_pr_is_deleted(self):
+        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(3, state="MERGED", items=[item(status="Done ✅", archived=True)])]})
+        sweep(gh)
+        self.assertEqual(gh.writes(), [("delete", "I-P1")])
+
+    def test_archived_item_of_open_pr_counts_as_on_board(self):
+        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(3, assignees=["alice"], items=[item(archived=True)])]})
         sweep(gh)
         self.assertEqual(gh.writes(), [])
 
     def test_item_on_another_project_does_not_count(self):
-        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(4, state="CLOSED", items=[item(project="P9", status="Done ✅")])]})
+        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(4, assignees=["alice"], items=[item(project="P9")]),
+                                                   pr(5, state="CLOSED", items=[item(project="P9")])]})
         sweep(gh)
-        self.assertEqual(gh.writes(), [("add", "PR4"), ("status", "item-PR4", "opt-done")])
+        self.assertEqual(gh.writes(), [("add", "PR4"), ("status", "item-PR4", "opt-prog")])
 
     def test_bot_author_not_assigned(self):
         gh = FakeGitHub(pulls={"prosopo/captcha": [pr(9, login="dependabot", kind="Bot", items=[item()])]})
@@ -185,21 +197,26 @@ class SweepTests(unittest.TestCase):
         self.assertEqual([e["repo"] for e in events(logs, "pr.synced")], ["prosopo/b", "prosopo/a"])
 
     def test_dry_run_plans_without_writing(self):
-        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(1), pr(2, state="MERGED")]})
+        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(1), pr(2, state="MERGED", items=[item()])]})
         rc, logs = sweep(gh, "--dry-run")
-        self.assertEqual((rc, gh.writes()), (0, []))
-        self.assertEqual(events(logs, "run.planned")[0]["writes"], 5)
+        self.assertEqual((rc, gh.writes(), gh.sleeps), (0, [], []))
+        self.assertEqual(events(logs, "run.planned")[0]["writes"], 4)
         self.assertEqual(events(logs, "pr.would_sync")[0]["steps"], ["add", "status:In progress 📊", "assign:alice"])
 
     def test_write_budget_stops_the_run_cleanly(self):
-        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(n, state="MERGED") for n in range(1, 6)]})
+        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(n, assignees=["alice"]) for n in range(1, 6)]})
         rc, logs = sweep(gh, "--max-writes", "5")
         self.assertEqual(rc, 0)
         self.assertEqual(len(gh.writes()), 4)
         self.assertEqual(events(logs, "run.budget_spent")[0]["remaining_prs"], 3)
 
+    def test_every_write_is_paced(self):
+        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(1), pr(2, state="MERGED", items=[item()])]})
+        sweep(gh, "--write-interval", "0.5")
+        self.assertEqual(gh.sleeps, [0.5] * 4)
+
     def test_throttling_stops_the_run_without_failing_it(self):
-        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(n, state="MERGED") for n in range(1, 6)]}, throttle_after=2)
+        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(n, assignees=["alice"]) for n in range(1, 6)]}, throttle_after=2)
         rc, logs = sweep(gh)
         self.assertEqual(rc, 0)
         self.assertEqual(len(events(logs, "run.throttled")), 1)
@@ -219,7 +236,7 @@ class SweepTests(unittest.TestCase):
                          ["run.start", "repo.failed", "run.planned", "pr.synced", "run.done"])
 
     def test_unknown_status_fails_before_any_write(self):
-        gh = FakeGitHub(project={"id": "P1", "field": {"id": "F1", "options": OPTIONS[:1]}},
+        gh = FakeGitHub(project={"id": "P1", "field": {"id": "F1", "options": OPTIONS[1:]}},
                         pulls={"prosopo/captcha": [pr(11)]})
         with self.assertRaises(RuntimeError):
             sweep(gh)
@@ -235,7 +252,7 @@ class SweepTests(unittest.TestCase):
 
     def test_rejects_bad_args(self):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            pb.main(["--owner", "o", "--project-number", "x", "--open-status", "a", "--closed-status", "b"],
+            pb.main(["--owner", "o", "--project-number", "x", "--open-status", "a"],
                     gh=FakeGitHub())
 
 
