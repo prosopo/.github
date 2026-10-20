@@ -1,0 +1,48 @@
+# Keeps every PR in every non-archived prosopo repo on https://github.com/orgs/prosopo/projects/4:
+# PRs missing from the board are added, open (drafts included) as "In progress 📊" with the author
+# assigned, merged/closed as "Done ✅"; a merged/closed PR still active on the board moves to "Done ✅".
+# A schedule here instead of pull_request triggers in every repo: see scripts/project_board.py.
+# Auth: the default GITHUB_TOKEN can't write org projects or other repos, so this mints a
+# token from the org's prosopo-project-board GitHub App (vars.PROJECT_APP_CLIENT_ID +
+# secrets.PROJECT_APP_PRIVATE_KEY; installed on all repos with org Projects, Pull requests + Issues RW).
+name: project-board
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      max-writes:
+        description: Stop after this many writes; the next run continues
+        default: "70"
+
+permissions: {}
+
+concurrency:
+  group: project-board
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.PROJECT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PROJECT_APP_PRIVATE_KEY }}
+          owner: prosopo
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+      - name: Sweep pull requests
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          # 70 writes every 10 minutes stays under GitHub's ~500 content-creating requests an hour.
+          MAX_WRITES: ${{ inputs.max-writes || '70' }}
+        run: |
+          python3 scripts/project_board.py --owner prosopo --project-number 4 \
+            --open-status "In progress 📊" --closed-status "Done ✅" \
+            --max-writes "$MAX_WRITES"
