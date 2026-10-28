@@ -310,6 +310,51 @@ class TransportTests(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, pb.Throttled)
         self.assertIn("404", str(ctx.exception))
 
+    def flaky(self, *failures, body=b'{"ok": 1}'):
+        attempts, sleeps = [], []
+
+        def opener(req, timeout):
+            attempts.append(req.full_url)
+            if len(attempts) <= len(failures):
+                raise failures[len(attempts) - 1]
+            return Resp(body)
+        return pb.GitHub("t", opener=opener, sleep=sleeps.append), attempts, sleeps
+
+    def test_5xx_is_retried_with_backoff_then_succeeds(self):
+        gh, attempts, sleeps = self.flaky(http_error(502, b"Bad Gateway"), http_error(503, b""))
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(gh.request("POST", "/graphql", {}), {"ok": 1})
+        self.assertEqual((len(attempts), sleeps), (3, [2, 5]))
+        self.assertEqual([json.loads(line)["event"] for line in out.getvalue().splitlines()], ["http.retry"] * 2)
+
+    def test_dropped_connection_is_retried(self):
+        gh, attempts, sleeps = self.flaky(urllib.error.URLError("reset"), TimeoutError("timed out"))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(gh.request("GET", "/x"), {"ok": 1})
+        self.assertEqual(sleeps, [2, 5])
+
+    def test_5xx_gives_up_after_every_retry(self):
+        gh, attempts, sleeps = self.flaky(*[http_error(502, b"Bad Gateway") for _ in range(6)])
+        with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError) as ctx:
+            gh.request("POST", "/graphql", {})
+        self.assertNotIsInstance(ctx.exception, pb.Throttled)
+        self.assertIn("502", str(ctx.exception))
+        self.assertEqual((len(attempts), sleeps), (6, list(pb.RETRY_DELAYS)))
+
+    def test_dropped_connection_gives_up_after_every_retry(self):
+        gh, attempts, _ = self.flaky(*[urllib.error.URLError("reset") for _ in range(6)])
+        with redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError) as ctx:
+            gh.request("GET", "/x")
+        self.assertIn("reset", str(ctx.exception))
+        self.assertEqual(len(attempts), 6)
+
+    def test_4xx_and_throttles_are_not_retried(self):
+        for err in (http_error(404, b"Not Found"), http_error(429, b"")):
+            gh, attempts, sleeps = self.flaky(err)
+            with self.assertRaises((RuntimeError, pb.Throttled)):
+                gh.request("GET", "/x")
+            self.assertEqual((len(attempts), sleeps), (1, []))
+
     def test_empty_body_returns_empty_dict(self):
         self.assertEqual(pb.GitHub("t", opener=lambda req, timeout: Resp(b"")).request("POST", "/x", {}), {})
 
