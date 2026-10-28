@@ -15,10 +15,12 @@ which would mean a file in every repo, and pull_request_target (needed to give f
 PRs the token) is a known injection risk.
 
 GitHub caps content-creating requests at about 80 a minute and 500 an hour, and the
-first sweep has over a thousand old PR items to delete. So each run makes at most
+first sweep had about a thousand writes to make. So each run makes at most
 --max-writes writes, --write-interval seconds apart, newest PRs first, and stops
 cleanly if GitHub throttles it anyway. Later runs skip what is already in step, so a
-backlog drains over successive runs.
+backlog drains over successive runs. 5xx answers and dropped connections are retried
+per request (RETRY_DELAYS) before that PR or repo counts as failed: on 2026-10-20 two
+of the first seven hourly runs failed on a stray 502 each.
 """
 
 import argparse
@@ -46,10 +48,34 @@ def is_throttle(status, headers, body):
     return status == 403 and ("retry-after" in headers or "rate limit" in body.lower())
 
 
+RETRY_DELAYS = (2, 5, 15, 30, 60)
+
+
 class GitHub:
-    def __init__(self, token, opener=urllib.request.urlopen):
+    def __init__(self, token, opener=urllib.request.urlopen, sleep=time.sleep):
         self.token = token
         self.opener = opener
+        self.sleep = sleep
+
+    def _send(self, method, path, req):
+        """GitHub answers 5xx and drops connections now and then, so those are retried with backoff.
+        Retrying a write that GitHub applied before failing is safe for adds (the existing item
+        comes back), statuses and assignees; a repeated delete fails, and the next run sees the
+        item gone."""
+        for attempt, delay in enumerate((*RETRY_DELAYS, None), start=1):
+            try:
+                with self.opener(req, timeout=30) as resp:
+                    return resp.read()
+            except urllib.error.HTTPError as e:
+                if e.code < 500 or delay is None:
+                    raise
+                error = f"{e.code}"
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                if delay is None:
+                    raise RuntimeError(f"{method} {path}: {e}") from e
+                error = str(e)
+            log("http.retry", method=method, path=path, attempt=attempt, delay_s=delay, error=error[:200])
+            self.sleep(delay)
 
     def request(self, method, path, body=None):
         req = urllib.request.Request(
@@ -63,8 +89,7 @@ class GitHub:
             },
         )
         try:
-            with self.opener(req, timeout=30) as resp:
-                raw = resp.read()
+            raw = self._send(method, path, req)
         except urllib.error.HTTPError as e:
             text = e.read().decode(errors="replace")
             headers = {k.lower(): v for k, v in (e.headers or {}).items()}
@@ -227,7 +252,7 @@ def main(argv=None, gh=None, sleep=time.sleep):
                     help="seconds to wait before each write, keeping under ~80 content-creating requests a minute")
     ap.add_argument("--dry-run", action="store_true", help="plan and log the writes without making any")
     a = ap.parse_args(argv)
-    gh = gh or GitHub(os.environ["GH_TOKEN"])
+    gh = gh or GitHub(os.environ["GH_TOKEN"], sleep=sleep)
     board = Board(gh, a.owner, a.project_number)
     board.option(a.open_status)
     repos = a.repo or org_repos(gh)
