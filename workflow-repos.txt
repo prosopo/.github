@@ -1,0 +1,17 @@
+# prosopo repos that follow the shared workflow rules (parity, permissions, node version,
+# concurrency keys, pipeline entry points, default branch, act-awareness). One per line.
+captcha-private
+captcha
+Protect
+docs
+chaddy
+ipinfo-lists
+jsob
+vernon
+typeshape
+gh-runner
+github_actions
+procaptcha-wordpress-plugin
+procaptcha-wordpress-plugin-private
+gham
+.github
