@@ -6,14 +6,16 @@ from contextlib import redirect_stderr, redirect_stdout
 
 import project_board as pb
 
-OPTIONS = [{"id": "opt-prog", "name": "In progress 📊"}, {"id": "opt-done", "name": "Done ✅"},
-           {"id": "opt-high", "name": "High Priority"}]
+OPTIONS = [
+    {"id": "opt-prog", "name": "In progress 📊"},
+    {"id": "opt-done", "name": "Done ✅"},
+    {"id": "opt-high", "name": "High Priority"},
+]
 
 
 class FakeGitHub:
     def __init__(self, project=None, pulls=None, repos=None, fail_add_for=(), fail_list_for=(), throttle_after=None):
-        self.project = project if project is not None else {
-            "id": "P1", "field": {"id": "F1", "options": OPTIONS}}
+        self.project = project if project is not None else {"id": "P1", "field": {"id": "F1", "options": OPTIONS}}
         self.pulls = pulls or {}
         self.repos = repos or []
         self.fail_add_for = set(fail_add_for)
@@ -39,9 +41,14 @@ class FakeGitHub:
                 raise RuntimeError("404")
             start = int(v["after"] or 0)
             items = self.pulls.get(repo, [])
-            return {"repository": {"pullRequests": {
-                "pageInfo": {"hasNextPage": start + 100 < len(items), "endCursor": str(start + 100)},
-                "nodes": items[start:start + 100]}}}
+            return {
+                "repository": {
+                    "pullRequests": {
+                        "pageInfo": {"hasNextPage": start + 100 < len(items), "endCursor": str(start + 100)},
+                        "nodes": items[start : start + 100],
+                    }
+                }
+            }
         if "addProjectV2ItemById" in query:
             self.calls.append(("add", v["content"]))
             self._maybe_throttle()
@@ -61,7 +68,7 @@ class FakeGitHub:
     def request(self, method, path, body=None):
         if method == "GET":
             page = int(path.split("page=")[-1])
-            batch = self.repos[(page - 1) * 100: page * 100]
+            batch = self.repos[(page - 1) * 100 : page * 100]
             return {"repositories": batch}
         self.calls.append((method, path, body))
         self._maybe_throttle()
@@ -69,22 +76,34 @@ class FakeGitHub:
 
 
 def item(project="P1", status=None, archived=False):
-    return {"id": f"I-{project}", "isArchived": archived, "project": {"id": project},
-            "status": {"name": status} if status else None}
+    return {
+        "id": f"I-{project}",
+        "isArchived": archived,
+        "project": {"id": project},
+        "status": {"name": status} if status else None,
+    }
 
 
 def pr(n, state="OPEN", login="alice", kind="User", assignees=(), items=(), updated="2026-10-20T08:00:00Z"):
-    return {"id": f"PR{n}", "number": n, "state": state, "updatedAt": updated,
-            "author": {"login": login, "__typename": kind} if login else None,
-            "assignees": {"nodes": [{"login": a} for a in assignees]},
-            "projectItems": {"nodes": list(items)}}
+    return {
+        "id": f"PR{n}",
+        "number": n,
+        "state": state,
+        "updatedAt": updated,
+        "author": {"login": login, "__typename": kind} if login else None,
+        "assignees": {"nodes": [{"login": a} for a in assignees]},
+        "projectItems": {"nodes": list(items)},
+    }
 
 
 def run(gh, *args):
     out = io.StringIO()
     with redirect_stdout(out):
-        rc = pb.main(["--owner", "prosopo", "--project-number", "4",
-                      "--open-status", "In progress 📊", *args], gh=gh, sleep=gh.sleeps.append)
+        rc = pb.main(
+            ["--owner", "prosopo", "--project-number", "4", "--open-status", "In progress 📊", *args],
+            gh=gh,
+            sleep=gh.sleeps.append,
+        )
     return rc, [json.loads(line) for line in out.getvalue().splitlines()]
 
 
@@ -101,8 +120,14 @@ class PlanTests(unittest.TestCase):
         gh = FakeGitHub(pulls={"prosopo/captcha": [pr(7)]})
         rc, _ = sweep(gh)
         self.assertEqual(rc, 0)
-        self.assertEqual(gh.writes(), [("add", "PR7"), ("status", "item-PR7", "opt-prog"),
-                                       ("POST", "/repos/prosopo/captcha/issues/7/assignees", {"assignees": ["alice"]})])
+        self.assertEqual(
+            gh.writes(),
+            [
+                ("add", "PR7"),
+                ("status", "item-PR7", "opt-prog"),
+                ("POST", "/repos/prosopo/captcha/issues/7/assignees", {"assignees": ["alice"]}),
+            ],
+        )
 
     def test_merged_and_closed_prs_not_on_board_are_not_added(self):
         gh = FakeGitHub(pulls={"prosopo/captcha": [pr(8, state="MERGED"), pr(9, state="CLOSED")]})
@@ -138,7 +163,9 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(gh.writes(), [("delete", "I-P1")])
 
     def test_archived_item_of_closed_pr_is_deleted(self):
-        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(3, state="MERGED", items=[item(status="Done ✅", archived=True)])]})
+        gh = FakeGitHub(
+            pulls={"prosopo/captcha": [pr(3, state="MERGED", items=[item(status="Done ✅", archived=True)])]}
+        )
         sweep(gh)
         self.assertEqual(gh.writes(), [("delete", "I-P1")])
 
@@ -148,8 +175,14 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(gh.writes(), [])
 
     def test_item_on_another_project_does_not_count(self):
-        gh = FakeGitHub(pulls={"prosopo/captcha": [pr(4, assignees=["alice"], items=[item(project="P9")]),
-                                                   pr(5, state="CLOSED", items=[item(project="P9")])]})
+        gh = FakeGitHub(
+            pulls={
+                "prosopo/captcha": [
+                    pr(4, assignees=["alice"], items=[item(project="P9")]),
+                    pr(5, state="CLOSED", items=[item(project="P9")]),
+                ]
+            }
+        )
         sweep(gh)
         self.assertEqual(gh.writes(), [("add", "PR4"), ("status", "item-PR4", "opt-prog")])
 
@@ -171,8 +204,11 @@ class PlanTests(unittest.TestCase):
 
 class SweepTests(unittest.TestCase):
     def test_defaults_to_every_non_archived_repo(self):
-        repos = [{"full_name": "prosopo/a", "archived": False}, {"full_name": "prosopo/old", "archived": True},
-                 {"full_name": "prosopo/b", "archived": False}]
+        repos = [
+            {"full_name": "prosopo/a", "archived": False},
+            {"full_name": "prosopo/old", "archived": True},
+            {"full_name": "prosopo/b", "archived": False},
+        ]
         gh = FakeGitHub(repos=repos, pulls={"prosopo/a": [pr(1)], "prosopo/b": [pr(2)]})
         rc, logs = run(gh)
         self.assertEqual(rc, 0)
@@ -191,8 +227,12 @@ class SweepTests(unittest.TestCase):
         self.assertEqual([c[2] for c in gh.calls if c[0] == "list"], [None, "100"])
 
     def test_newest_prs_across_repos_go_first(self):
-        gh = FakeGitHub(pulls={"prosopo/a": [pr(1, updated="2026-01-01T00:00:00Z")],
-                               "prosopo/b": [pr(2, updated="2026-10-01T00:00:00Z")]})
+        gh = FakeGitHub(
+            pulls={
+                "prosopo/a": [pr(1, updated="2026-01-01T00:00:00Z")],
+                "prosopo/b": [pr(2, updated="2026-10-01T00:00:00Z")],
+            }
+        )
         _, logs = run(gh, "--repo", "prosopo/a", "--repo", "prosopo/b")
         self.assertEqual([e["repo"] for e in events(logs, "pr.synced")], ["prosopo/b", "prosopo/a"])
 
@@ -232,12 +272,14 @@ class SweepTests(unittest.TestCase):
         gh = FakeGitHub(pulls={"prosopo/docs": [pr(1)]}, fail_list_for={"prosopo/gone"})
         rc, logs = run(gh, "--repo", "prosopo/gone", "--repo", "prosopo/docs")
         self.assertEqual(rc, 1)
-        self.assertEqual([e["event"] for e in logs],
-                         ["run.start", "repo.failed", "run.planned", "pr.synced", "run.done"])
+        self.assertEqual(
+            [e["event"] for e in logs], ["run.start", "repo.failed", "run.planned", "pr.synced", "run.done"]
+        )
 
     def test_unknown_status_fails_before_any_write(self):
-        gh = FakeGitHub(project={"id": "P1", "field": {"id": "F1", "options": OPTIONS[1:]}},
-                        pulls={"prosopo/captcha": [pr(11)]})
+        gh = FakeGitHub(
+            project={"id": "P1", "field": {"id": "F1", "options": OPTIONS[1:]}}, pulls={"prosopo/captcha": [pr(11)]}
+        )
         with self.assertRaises(RuntimeError):
             sweep(gh)
         self.assertEqual(gh.writes(), [])
@@ -252,8 +294,7 @@ class SweepTests(unittest.TestCase):
 
     def test_rejects_bad_args(self):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            pb.main(["--owner", "o", "--project-number", "x", "--open-status", "a"],
-                    gh=FakeGitHub())
+            pb.main(["--owner", "o", "--project-number", "x", "--open-status", "a"], gh=FakeGitHub())
 
 
 class _NoProject(FakeGitHub):
@@ -277,6 +318,7 @@ class TransportTests(unittest.TestCase):
     def raising(self, err):
         def opener(req, timeout):
             raise err
+
         return pb.GitHub("t", opener=opener)
 
     def test_graphql_errors_raise(self):
@@ -288,7 +330,9 @@ class TransportTests(unittest.TestCase):
             pb.GitHub("t", opener=opener).graphql("query{x}")
 
     def test_graphql_rate_limited_is_throttle(self):
-        gh = pb.GitHub("t", opener=lambda req, timeout: Resp(json.dumps({"errors": [{"type": "RATE_LIMITED"}]}).encode()))
+        gh = pb.GitHub(
+            "t", opener=lambda req, timeout: Resp(json.dumps({"errors": [{"type": "RATE_LIMITED"}]}).encode())
+        )
         with self.assertRaises(pb.Throttled):
             gh.graphql("query{x}")
 
@@ -318,6 +362,7 @@ class TransportTests(unittest.TestCase):
             if len(attempts) <= len(failures):
                 raise failures[len(attempts) - 1]
             return Resp(body)
+
         return pb.GitHub("t", opener=opener, sleep=sleeps.append), attempts, sleeps
 
     def test_5xx_is_retried_with_backoff_then_succeeds(self):
@@ -328,7 +373,7 @@ class TransportTests(unittest.TestCase):
         self.assertEqual([json.loads(line)["event"] for line in out.getvalue().splitlines()], ["http.retry"] * 2)
 
     def test_dropped_connection_is_retried(self):
-        gh, attempts, sleeps = self.flaky(urllib.error.URLError("reset"), TimeoutError("timed out"))
+        gh, _, sleeps = self.flaky(urllib.error.URLError("reset"), TimeoutError("timed out"))
         with redirect_stdout(io.StringIO()):
             self.assertEqual(gh.request("GET", "/x"), {"ok": 1})
         self.assertEqual(sleeps, [2, 5])

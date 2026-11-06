@@ -1,0 +1,3 @@
+# ruff config for scripts/; CI runs `ruff check` and `ruff format --check` (.github/workflows/ci.yml).
+line-length = 120
+target-version = "py312"
