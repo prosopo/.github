@@ -35,7 +35,10 @@ API = "https://api.github.com"
 
 
 def log(event, **kw):
-    print(json.dumps({"event": event, "t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **kw}, ensure_ascii=False), flush=True)
+    print(
+        json.dumps({"event": event, "t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **kw}, ensure_ascii=False),
+        flush=True,
+    )
 
 
 class Throttled(Exception):
@@ -199,8 +202,7 @@ def repo_prs(gh, repo):
     after = None
     while True:
         conn = gh.graphql(PULLS_QUERY, owner=owner, name=name, after=after)["repository"]["pullRequests"]
-        for pr in conn["nodes"]:
-            yield pr
+        yield from conn["nodes"]
         if not conn["pageInfo"]["hasNextPage"]:
             return
         after = conn["pageInfo"]["endCursor"]
@@ -248,8 +250,12 @@ def main(argv=None, gh=None, sleep=time.sleep):
     ap.add_argument("--open-status", required=True)
     ap.add_argument("--repo", action="append", help="owner/repo to sweep; repeat. Default: every non-archived repo")
     ap.add_argument("--max-writes", type=int, default=400, help="stop after this many writes; the next run continues")
-    ap.add_argument("--write-interval", type=float, default=1.0,
-                    help="seconds to wait before each write, keeping under ~80 content-creating requests a minute")
+    ap.add_argument(
+        "--write-interval",
+        type=float,
+        default=1.0,
+        help="seconds to wait before each write, keeping under ~80 content-creating requests a minute",
+    )
     ap.add_argument("--dry-run", action="store_true", help="plan and log the writes without making any")
     a = ap.parse_args(argv)
     gh = gh or GitHub(os.environ["GH_TOKEN"], sleep=sleep)
@@ -268,14 +274,19 @@ def main(argv=None, gh=None, sleep=time.sleep):
                         todo.append((pr["updatedAt"], repo, pr, item, steps))
             except Throttled:
                 raise
-            except Exception as e:  # one unreachable repo must not stop the others
+            except Exception as e:  # noqa: BLE001 -- one unreachable repo must not stop the others
                 failures += 1
                 log("repo.failed", repo=repo, error=str(e)[:300])
         todo.sort(key=lambda t: t[0], reverse=True)
         log("run.planned", prs=len(todo), writes=sum(len(t[4]) for t in todo))
         if a.dry_run:
             for _, repo, pr, _, steps in todo[:20]:
-                log("pr.would_sync", repo=repo, pr=pr["number"], steps=[k if v is None else f"{k}:{v}" for k, v in steps])
+                log(
+                    "pr.would_sync",
+                    repo=repo,
+                    pr=pr["number"],
+                    steps=[k if v is None else f"{k}:{v}" for k, v in steps],
+                )
             return 1 if failures else 0
 
         writes = 0
@@ -288,7 +299,7 @@ def main(argv=None, gh=None, sleep=time.sleep):
                 synced += 1
             except Throttled:
                 raise
-            except Exception as e:  # one bad PR must not stop the sweep
+            except Exception as e:  # noqa: BLE001 -- one bad PR must not stop the sweep
                 failures += 1
                 log("pr.failed", repo=repo, pr=pr["number"], error=str(e)[:300])
             writes += len(steps)

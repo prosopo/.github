@@ -1,0 +1,58 @@
+# CI entry point: lints and unit-tests scripts/ (the project-board sweep that
+# project-board.yml runs every hour) through the shared static and test stage
+# workflows in https://github.com/prosopo/github_actions. Both stages skip their
+# python job when a change touched no Python.
+#
+# Each stage is pinned to a github_actions main commit, and actions-ref must
+# name the same SHA; bump them together.
+
+name: ci
+
+on:
+  pull_request:
+    # converted_to_draft is here so the run is created, claims the concurrency
+    # group and so cancels whatever is still in flight for the PR.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
+
+env:
+  FORCE_COLOR: "1"
+  DO_NOT_TRACK: "1"
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  static:
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft) }}
+    uses: prosopo/github_actions/.github/workflows/static.yml@aad6948e39327c9ea0dc2d3a6b9dc55362340539
+    with:
+      actions-ref: aad6948e39327c9ea0dc2d3a6b9dc55362340539
+      runs-on: ubuntu-latest
+      timeout-minutes: 10
+      # The stage checks its own scripts out into .shared-actions/ inside the
+      # workspace; they are not this repo's code, so ruff skips them.
+      python-command: >-
+        timeout 300 uvx --python 3.12 ruff@0.17.2 check --extend-exclude .shared-actions . &&
+        timeout 300 uvx --python 3.12 ruff@0.17.2 format --check --extend-exclude .shared-actions .
+
+  test:
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft) }}
+    uses: prosopo/github_actions/.github/workflows/test.yml@aad6948e39327c9ea0dc2d3a6b9dc55362340539
+    with:
+      actions-ref: aad6948e39327c9ea0dc2d3a6b9dc55362340539
+      runs-on: ubuntu-latest
+      timeout-minutes: 10
+      python-command: timeout 300 uv run --no-project --python 3.12 python -m unittest discover -q -s scripts
